@@ -2,6 +2,7 @@ local M = {
     history = {},
     config = {
         re_sort = true,
+        show_full_path = false,
         initial_mode = "normal",
         layout_config = {
             prompt_position = "top",
@@ -11,7 +12,6 @@ local M = {
     },
 }
 
-
 function M.setup(opts)
     opts = opts or {}
     M.config = vim.tbl_deep_extend("force", M.config, opts)
@@ -19,13 +19,26 @@ end
 
 -- Adds the current buffer to the file history.
 function M.add_to_history()
-    local bufname = vim.fn.expand('%:p') -- Get the full path of the current buffer
-    if bufname == "" then return end -- Ignore empty buffers
-    if vim.fn.filereadable(bufname) == 0 then return end -- Ignore non-readable buffers
+    -- Get the full path of the current buffer
+    local fullpath = vim.fn.expand('%:p')
+    if fullpath == "" then
+        return
+    end
+
+    -- Ignore non-readable buffers
+    if vim.fn.filereadable(fullpath) == 0 then
+        return
+    end
+
+    -- Get the relative path of the current buffer
+    local relpath = vim.fn.fnamemodify(fullpath, ":.")
+
+    -- Get the current buffer filename
+    local filename = vim.fn.fnamemodify(fullpath, ":t")
 
     -- If the file is already in history, remove it
     for i, entry in ipairs(M.history) do
-        if entry == bufname then
+        if entry.fullpath == fullpath then
             if M.config.re_sort then
                 table.remove(M.history, i)
                 break
@@ -34,13 +47,17 @@ function M.add_to_history()
         end
     end
 
-    table.insert(M.history, 1, bufname)
+    table.insert(M.history, 1, {
+        fullpath = fullpath,
+        relpath = relpath,
+        filename = filename,
+    })
 end
 
 -- Function to open a file from the history by index
 function M.open_file_from_history(index)
     if M.history[index] then
-        vim.api.nvim_command("e " .. M.history[index])
+        vim.api.nvim_command("e " .. M.history[index].fullpath)
     end
 end
 
@@ -51,16 +68,40 @@ function M.remove_file_from_history(index)
     end
 end
 
+local function get_max_length()
+    local max_length = 0
+    for _, file in ipairs(M.history) do
+        local length = #file.filename
+        if length > max_length then
+            max_length = length
+        end
+    end
+    return max_length
+end
+
+local function pad(str, len)
+    return str .. string.rep(" ", len - #str)
+end
+
 function M.recall()
     local finders = require "telescope.finders"
     local pickers = require "telescope.pickers"
     local actions = require "telescope.actions"
     local actions_state = require "telescope.actions.state"
 
+    -- Check if history is empty
+
     local function get_results()
+        local max_length = get_max_length()
         local items = {}
         for i, file in ipairs(M.history) do
-            table.insert(items, { display = file, value = i })
+            local display = pad(file.filename, max_length)
+            if M.config.show_full_path then
+                display = display .. "  " .. file.fullpath
+            else
+                display = display .. "  " .. file.relpath
+            end
+            table.insert(items, { display = display, value = i })
         end
         return items
     end
@@ -73,10 +114,21 @@ function M.recall()
         }
     end
 
+    local function reload_picker(prompt_bufnr)
+        local picker = actions_state.get_current_picker(prompt_bufnr)
+        picker:refresh(
+            finders.new_table {
+                results = get_results(),
+                entry_maker = entry_maker,
+            },
+            { reset_prompt = true }
+        )
+    end
+
     pickers.new({}, {
         initial_mode = M.config.initial_mode,
         prompt_title = "Recall",
-        results_title = "(d)elete",
+        results_title = "(d)elete   (s)witch",
         finder = finders.new_table {
             results = get_results(),
             entry_maker = entry_maker,
@@ -91,18 +143,15 @@ function M.recall()
                 M.open_file_from_history(selection.value)
             end)
 
+            map('n', 's', function(prompt_bufnr)
+                M.config.show_full_path = not M.config.show_full_path
+                reload_picker(prompt_bufnr)
+           end)
+
             map('n', 'd', function(prompt_bufnr)
                 local selection = actions_state.get_selected_entry()
                 M.remove_file_from_history(selection.value)
-
-                local picker = actions_state.get_current_picker(prompt_bufnr)
-                picker:refresh(
-                    finders.new_table {
-                        results = get_results(),
-                        entry_maker = entry_maker,
-                    },
-                    { reset_prompt = true }
-                )
+                reload_picker(prompt_bufnr)
             end)
             return true
         end,
